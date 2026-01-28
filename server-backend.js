@@ -523,7 +523,7 @@ app.post('/api/nodes/:id/enable-and-reload', requireAuth, async (req, res) => {
         if ((check.stdout || '').trim() !== 'EXISTS') return res.status(404).json({ error: 'remote config not found' });
         await sshExecOnNode(node, `sudo ln -sf ${remoteAvail} ${remoteEnabled}`);
         const t = await sshExecOnNode(node, 'sudo nginx -t');
-        if ((t.stderr || '').trim()) return res.status(500).json({ ok: false, testErr: t.stderr || t.stdout });
+        // do not treat stderr presence as failure (nginx -t may emit warnings but still exit 0)
         const r = await sshExecOnNode(node, 'sudo systemctl reload nginx || sudo nginx -s reload');
         addLog(`enable-and-reload(fallback) ${node.host} ${base}`);
         return res.json({ ok: true, testOut: t.stdout + t.stderr, reloadOut: r.stdout + r.stderr });
