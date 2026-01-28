@@ -348,8 +348,35 @@ async function sshConnectToNode(node) {
     opts.privateKey = MANAGEMENT_KEY;
   }
   // note: can be extended to support passwords or other keys
-  await ssh.connect(opts);
-  return ssh;
+  try {
+    await ssh.connect(opts);
+    return ssh;
+  } catch (e) {
+    // ssh2 may fail to parse certain private key formats (OpenSSH new format). We'll surface the error to caller
+    throw new Error('SSH connect failed: ' + String(e));
+  }
+}
+
+// Fallback helpers using system scp/ssh (avoids privateKey parsing issues in ssh2)
+function runLocalCmd(cmd) {
+  return new Promise((resolve, reject) => {
+    exec(cmd, { maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) return reject({ err, stdout: String(stdout || ''), stderr: String(stderr || '') });
+      resolve({ stdout: String(stdout || ''), stderr: String(stderr || ''), code: 0 });
+    });
+  });
+}
+
+async function scpToNode(node, localPath, remoteTmp) {
+  const keyOpt = fs.existsSync(MANAGEMENT_KEY) ? `-i ${MANAGEMENT_KEY}` : '';
+  const cmd = `scp -o StrictHostKeyChecking=no ${keyOpt} -P ${node.port} ${localPath} ${node.user}@${node.host}:${remoteTmp}`;
+  return await runLocalCmd(cmd);
+}
+
+async function sshExecOnNode(node, cmd) {
+  const keyOpt = fs.existsSync(MANAGEMENT_KEY) ? `-i ${MANAGEMENT_KEY}` : '';
+  const sshCmd = `ssh -o StrictHostKeyChecking=no ${keyOpt} -p ${node.port} ${node.user}@${node.host} ${JSON.stringify(cmd)}`;
+  return await runLocalCmd(sshCmd);
 }
 
 app.post('/api/nodes/:id/push-config', requireAuth, async (req, res) => {
@@ -362,17 +389,34 @@ app.post('/api/nodes/:id/push-config', requireAuth, async (req, res) => {
     const localPath = path.join(CONFIG_DIR, safeName(filename));
     if (!fs.existsSync(localPath)) return res.status(404).json({ error: 'local config not found' });
 
-    const ssh = await sshConnectToNode(node);
-    const remoteTmp = `/tmp/${path.basename(filename)}.${Date.now()}`;
-    await ssh.putFile(localPath, remoteTmp);
-    // move into place with sudo
-    const remoteDest = `/etc/nginx/sites-available/${path.basename(filename)}`;
-    const mvCmd = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
-    const result = await ssh.execCommand(mvCmd, { cwd: '/' });
-    ssh.dispose();
-    addLog(`push-config ${node.host} ${filename} -> ${remoteDest} : ${result.code || 0}`);
-    if (result.stderr) return res.status(500).json({ ok: false, stdout: result.stdout, stderr: result.stderr });
-    res.json({ ok: true, stdout: result.stdout });
+    // Try with ssh2/node-ssh first
+    try {
+      const ssh = await sshConnectToNode(node);
+      const remoteTmp = `/tmp/${path.basename(filename)}.${Date.now()}`;
+      await ssh.putFile(localPath, remoteTmp);
+      // move into place with sudo
+      const remoteDest = `/etc/nginx/sites-available/${path.basename(filename)}`;
+      const mvCmd = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
+      const result = await ssh.execCommand(mvCmd, { cwd: '/' });
+      ssh.dispose();
+      addLog(`push-config ${node.host} ${filename} -> ${remoteDest} : ${result.code || 0}`);
+      if (result.stderr) return res.status(500).json({ ok: false, stdout: result.stdout, stderr: result.stderr });
+      return res.json({ ok: true, stdout: result.stdout });
+    } catch (e) {
+      // Fall back to CLI scp/ssh
+      try {
+        const remoteTmp = `/tmp/${path.basename(filename)}.${Date.now()}`;
+        await scpToNode(node, localPath, remoteTmp);
+        const remoteDest = `/etc/nginx/sites-available/${path.basename(filename)}`;
+        const mv = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
+        const r = await sshExecOnNode(node, mv);
+        addLog(`push-config(fallback) ${node.host} ${filename} -> ${remoteDest} : ${r.code || 0}`);
+        if (r.stderr) return res.status(500).json({ ok: false, stdout: r.stdout, stderr: r.stderr });
+        return res.json({ ok: true, stdout: r.stdout });
+      } catch (err) {
+        return res.status(500).json({ error: String(e || err) });
+      }
+    }
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -384,19 +428,36 @@ app.post('/api/nodes/:id/pull-config', requireAuth, async (req, res) => {
     const { filename } = req.body || {};
     if (!filename) return res.status(400).json({ error: 'filename required' });
     const remotePath = `/etc/nginx/sites-available/${path.basename(filename)}`;
-    const ssh = await sshConnectToNode(node);
-    const localTmp = path.join(os.tmpdir(), `nginx-gui-${crypto.randomBytes(4).toString('hex')}-${path.basename(filename)}`);
+    // Try with ssh2/node-ssh first
     try {
-      await ssh.getFile(localTmp, remotePath);
-    } catch (err) {
+      const ssh = await sshConnectToNode(node);
+      const remoteTmp = path.join(os.tmpdir(), `nginx-gui-${crypto.randomBytes(4).toString('hex')}-${path.basename(filename)}`);
+      try {
+        await ssh.getFile(localTmp, remotePath);
+      } catch (err) {
+        ssh.dispose();
+        return res.status(500).json({ error: 'failed to fetch remote file: ' + String(err) });
+      }
+      const content = fs.readFileSync(localTmp, 'utf8');
+      fs.unlinkSync(localTmp);
       ssh.dispose();
-      return res.status(500).json({ error: 'failed to fetch remote file: ' + String(err) });
+      addLog(`pull-config ${node.host} ${filename}`);
+      return res.json({ name: filename, content });
+    } catch (e) {
+      // fallback: use scp to copy remote->local via management server
+      try {
+        const localTmp2 = path.join(os.tmpdir(), `nginx-gui-${crypto.randomBytes(4).toString('hex')}-${path.basename(filename)}`);
+        const keyOpt = fs.existsSync(MANAGEMENT_KEY) ? `-i ${MANAGEMENT_KEY}` : '';
+        const cmd = `scp -o StrictHostKeyChecking=no ${keyOpt} -P ${node.port} ${node.user}@${node.host}:${remotePath} ${localTmp2}`;
+        await runLocalCmd(cmd);
+        const content = fs.readFileSync(localTmp2, 'utf8');
+        fs.unlinkSync(localTmp2);
+        addLog(`pull-config(fallback) ${node.host} ${filename}`);
+        return res.json({ name: filename, content });
+      } catch (err) {
+        return res.status(500).json({ error: String(e || err) });
+      }
     }
-    const content = fs.readFileSync(localTmp, 'utf8');
-    fs.unlinkSync(localTmp);
-    ssh.dispose();
-    addLog(`pull-config ${node.host} ${filename}`);
-    res.json({ name: filename, content });
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
@@ -447,15 +508,25 @@ app.post('/api/cluster/sync', requireAuth, async (req, res) => {
               if (!node) throw new Error('node not found: ' + nid);
               const localPath = path.join(CONFIG_DIR, safeName(f));
               if (!fs.existsSync(localPath)) throw new Error('local file not found: ' + f);
-              const ssh = await sshConnectToNode(node);
-              const remoteTmp = `/tmp/${path.basename(f)}.${Date.now()}`;
-              await ssh.putFile(localPath, remoteTmp);
-              const remoteDest = `/etc/nginx/sites-available/${path.basename(f)}`;
-              const mvCmd = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
-              const result = await ssh.execCommand(mvCmd);
-              ssh.dispose();
-              if (result.stderr) throw new Error(result.stderr || 'unknown error');
-              return { ok: true, node: node.host, file: f };
+              try {
+                const ssh = await sshConnectToNode(node);
+                const remoteTmp = `/tmp/${path.basename(f)}.${Date.now()}`;
+                await ssh.putFile(localPath, remoteTmp);
+                const remoteDest = `/etc/nginx/sites-available/${path.basename(f)}`;
+                const mvCmd = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
+                const result = await ssh.execCommand(mvCmd);
+                ssh.dispose();
+                if (result.stderr) throw new Error(result.stderr || 'unknown error');
+                return { ok: true, node: node.host, file: f };
+              } catch (e) {
+                // fallback to scp/ssh CLI
+                const remoteTmp = `/tmp/${path.basename(f)}.${Date.now()}`;
+                await scpToNode(node, localPath, remoteTmp);
+                const mv = `sudo mv ${remoteTmp} /etc/nginx/sites-available/${path.basename(f)} && sudo chown root:root /etc/nginx/sites-available/${path.basename(f)} && sudo chmod 644 /etc/nginx/sites-available/${path.basename(f)}`;
+                const rr = await sshExecOnNode(node, mv);
+                if (rr.stderr) throw new Error(rr.stderr || 'unknown error');
+                return { ok: true, node: node.host, file: f };
+              }
             })();
             results.push(r);
           } else {
