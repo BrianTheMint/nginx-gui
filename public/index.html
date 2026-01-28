@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>nginx-gui - Config Manager</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <aside>
+      <h3>🔧 Config Files</h3>
+      <ul id="file-list"></ul>
+      <input id="new-name" placeholder="filename.conf" />
+      <button id="new-btn">➕ New File</button>
+      <button id="download-btn">📥 Download</button>
+      <button id="enable-selected-btn">✓ Enable</button>
+      <button id="disable-selected-btn">✗ Disable</button>
+    </aside>
+    <main>
+      <div class="toolbar">
+        <label><input type="checkbox" id="write-system"> Write to /etc/nginx</label>
+        <button id="save-btn">💾 Save</button>
+        <button id="delete-btn">🗑 Delete</button>
+        <button id="validate-btn">✓ Validate</button>
+        <button id="reload-btn">🔄 Reload</button>
+        <button id="enable-btn">✓ Enable</button>
+        <button id="disable-btn">✗ Disable</button>
+        <label>Token: <input id="admin-token" type="password" placeholder="optional admin token"/></label>
+      </div>
+      <div id="validate-output"></div>
+      <textarea id="editor" spellcheck="false" placeholder="Select a config file or create a new one..."></textarea>
+    </main>
+  </div>
+  <script src="/app.js"></script>
+</body>
+</html>
+</body>
+</html>
