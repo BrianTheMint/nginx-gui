@@ -102,8 +102,14 @@ add_key_to_host(){
 register_node(){
   local host="$1"
   local name="node-${host//./-}"
-  log "Registering node $host as $name via local API"
-  curl -sS -H "Authorization: Bearer $TOKEN" -X POST -H "Content-Type: application/json" -d "{\"name\":\"$name\",\"host\":\"$host\",\"port\":22,\"user\":\"root\"}" http://localhost:3000/api/nodes || true
+  log "Checking if node $host already registered"
+  EXIST=$(curl -sS -H "Authorization: Bearer $TOKEN" http://localhost:3000/api/nodes | grep -o "\"host\":\"$host\"" || true)
+  if [ -n "$EXIST" ]; then
+    log "Node $host already registered; skipping add"
+  else
+    log "Registering node $host as $name via local API"
+    curl -sS -H "Authorization: Bearer $TOKEN" -X POST -H "Content-Type: application/json" -d "{\"name\":\"$name\",\"host\":\"$host\",\"port\":22,\"user\":\"root\"}" http://localhost:3000/api/nodes || true
+  fi
 }
 
 # optional app install on node
