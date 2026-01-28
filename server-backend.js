@@ -251,5 +251,223 @@ app.get('/api/download', async (req, res) => {
   }
 });
 
+// --- Cluster / Multi-node management (SSH-based MVP)
+const { NodeSSH } = require('node-ssh');
+const NODES_FILE = path.join(__dirname, 'nodes.json');
+const SSH_DIR = path.join(__dirname, '.ssh');
+const MANAGEMENT_KEY = path.join(SSH_DIR, 'id_manage');
+const CLUSTER_LOG = path.join(__dirname, 'cluster.log');
+
+function loadNodes() {
+  try {
+    if (!fs.existsSync(NODES_FILE)) return [];
+    return JSON.parse(fs.readFileSync(NODES_FILE, 'utf8') || '[]');
+  } catch (e) { return []; }
+}
+function saveNodes(nodes) {
+  fs.mkdirSync(path.dirname(NODES_FILE), { recursive: true });
+  fs.writeFileSync(NODES_FILE, JSON.stringify(nodes, null, 2), 'utf8');
+}
+function addLog(entry) {
+  try {
+    const line = `[${new Date().toISOString()}] ${entry}\n`;
+    fs.appendFileSync(CLUSTER_LOG, line);
+  } catch (e) { }
+}
+
+async function ensureManagementKey() {
+  try {
+    fs.mkdirSync(SSH_DIR, { recursive: true });
+    if (fs.existsSync(MANAGEMENT_KEY) && fs.existsSync(MANAGEMENT_KEY + '.pub')) {
+      return fs.readFileSync(MANAGEMENT_KEY + '.pub', 'utf8');
+    }
+    // generate using ssh-keygen
+    await new Promise((resolve, reject) => {
+      exec(`ssh-keygen -t rsa -b 4096 -f "${MANAGEMENT_KEY}" -N "" -C "nginx-gui management key"`, (err) => err ? reject(err) : resolve());
+    });
+    fs.chmodSync(MANAGEMENT_KEY, 0o600);
+    fs.chmodSync(MANAGEMENT_KEY + '.pub', 0o644);
+    return fs.readFileSync(MANAGEMENT_KEY + '.pub', 'utf8');
+  } catch (e) { throw e; }
+}
+
+app.get('/api/cluster/key', requireAuth, async (req, res) => {
+  try {
+    const pub = await ensureManagementKey();
+    res.json({ publicKey: pub });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/cluster/key', requireAuth, async (req, res) => {
+  try {
+    const pub = await ensureManagementKey();
+    res.json({ publicKey: pub });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.get('/api/nodes', requireAuth, async (req, res) => {
+  try { res.json({ nodes: loadNodes() }); } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/nodes', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const { name, host, port = 22, user = 'root', useManagementKey = true } = body;
+    if (!host || !name) return res.status(400).json({ error: 'name and host required' });
+    const nodes = loadNodes();
+    const id = crypto.randomBytes(6).toString('hex');
+    const node = { id, name, host, port, user, useManagementKey };
+    nodes.push(node);
+    saveNodes(nodes);
+    addLog(`node:add ${id} ${host}`);
+    res.json({ node });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.delete('/api/nodes/:id', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+    let nodes = loadNodes();
+    nodes = nodes.filter(n => n.id !== id);
+    saveNodes(nodes);
+    addLog(`node:remove ${id}`);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+function findNode(id) {
+  const nodes = loadNodes();
+  return nodes.find(n => n.id === id);
+}
+
+async function sshConnectToNode(node) {
+  const ssh = new NodeSSH();
+  const opts = { host: node.host, port: node.port, username: node.user, tryKeyboard: false };
+  if (node.useManagementKey) {
+    if (!fs.existsSync(MANAGEMENT_KEY)) throw new Error('management key not found on server; generate it first via /api/cluster/key');
+    opts.privateKey = MANAGEMENT_KEY;
+  }
+  // note: can be extended to support passwords or other keys
+  await ssh.connect(opts);
+  return ssh;
+}
+
+app.post('/api/nodes/:id/push-config', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const node = findNode(id);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const { filename } = req.body || {};
+    if (!filename) return res.status(400).json({ error: 'filename required' });
+    const localPath = path.join(CONFIG_DIR, safeName(filename));
+    if (!fs.existsSync(localPath)) return res.status(404).json({ error: 'local config not found' });
+
+    const ssh = await sshConnectToNode(node);
+    const remoteTmp = `/tmp/${path.basename(filename)}.${Date.now()}`;
+    await ssh.putFile(localPath, remoteTmp);
+    // move into place with sudo
+    const remoteDest = `/etc/nginx/sites-available/${path.basename(filename)}`;
+    const mvCmd = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
+    const result = await ssh.execCommand(mvCmd, { cwd: '/' });
+    ssh.dispose();
+    addLog(`push-config ${node.host} ${filename} -> ${remoteDest} : ${result.code || 0}`);
+    if (result.stderr) return res.status(500).json({ ok: false, stdout: result.stdout, stderr: result.stderr });
+    res.json({ ok: true, stdout: result.stdout });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+app.post('/api/nodes/:id/pull-config', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const node = findNode(id);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const { filename } = req.body || {};
+    if (!filename) return res.status(400).json({ error: 'filename required' });
+    const remotePath = `/etc/nginx/sites-available/${path.basename(filename)}`;
+    const ssh = await sshConnectToNode(node);
+    const localTmp = path.join(os.tmpdir(), `nginx-gui-${crypto.randomBytes(4).toString('hex')}-${path.basename(filename)}`);
+    try {
+      await ssh.getFile(localTmp, remotePath);
+    } catch (err) {
+      ssh.dispose();
+      return res.status(500).json({ error: 'failed to fetch remote file: ' + String(err) });
+    }
+    const content = fs.readFileSync(localTmp, 'utf8');
+    fs.unlinkSync(localTmp);
+    ssh.dispose();
+    addLog(`pull-config ${node.host} ${filename}`);
+    res.json({ name: filename, content });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// push certs (body: { files: [{ name, contentBase64 }], targetDir: '/etc/ssl/nginx' })
+app.post('/api/nodes/:id/push-certs', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const node = findNode(id);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const body = req.body || {};
+    const files = Array.isArray(body.files) ? body.files : [];
+    if (files.length === 0) return res.status(400).json({ error: 'no files' });
+    const targetDir = body.targetDir || '/etc/ssl/nginx';
+    const ssh = await sshConnectToNode(node);
+    const results = [];
+    for (const f of files) {
+      const name = safeName(f.name || 'cert');
+      const content = f.contentBase64 || '';
+      const tmpLocal = path.join(os.tmpdir(), `nginx-gui-cert-${crypto.randomBytes(4).toString('hex')}-${name}`);
+      fs.writeFileSync(tmpLocal, Buffer.from(content, 'base64'));
+      const remoteTmp = `/tmp/${name}.${Date.now()}`;
+      await ssh.putFile(tmpLocal, remoteTmp);
+      const dest = path.posix.join(targetDir, name);
+      const mv = `sudo mkdir -p ${targetDir} && sudo mv ${remoteTmp} ${dest} && sudo chown root:root ${dest} && sudo chmod 644 ${dest}`;
+      const r = await ssh.execCommand(mv);
+      results.push({ name, stdout: r.stdout, stderr: r.stderr, code: r.code || 0 });
+      fs.unlinkSync(tmpLocal);
+    }
+    ssh.dispose();
+    addLog(`push-certs ${node.host} files:${files.length}`);
+    res.json({ results });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
+// bulk sync: body { files: [filename...], nodes: [id...], action: 'push' }
+app.post('/api/cluster/sync', requireAuth, async (req, res) => {
+  try {
+    const { files = [], nodes = [], action = 'push' } = req.body || {};
+    if (!Array.isArray(files) || files.length === 0) return res.status(400).json({ error: 'no files' });
+    if (!Array.isArray(nodes) || nodes.length === 0) return res.status(400).json({ error: 'no nodes' });
+    const results = [];
+    for (const nid of nodes) {
+      for (const f of files) {
+        try {
+          if (action === 'push') {
+            const r = await (async () => {
+              const node = findNode(nid);
+              if (!node) throw new Error('node not found: ' + nid);
+              const localPath = path.join(CONFIG_DIR, safeName(f));
+              if (!fs.existsSync(localPath)) throw new Error('local file not found: ' + f);
+              const ssh = await sshConnectToNode(node);
+              const remoteTmp = `/tmp/${path.basename(f)}.${Date.now()}`;
+              await ssh.putFile(localPath, remoteTmp);
+              const remoteDest = `/etc/nginx/sites-available/${path.basename(f)}`;
+              const mvCmd = `sudo mv ${remoteTmp} ${remoteDest} && sudo chown root:root ${remoteDest} && sudo chmod 644 ${remoteDest}`;
+              const result = await ssh.execCommand(mvCmd);
+              ssh.dispose();
+              if (result.stderr) throw new Error(result.stderr || 'unknown error');
+              return { ok: true, node: node.host, file: f };
+            })();
+            results.push(r);
+          } else {
+            results.push({ ok: false, error: 'unsupported action' });
+          }
+        } catch (err) { results.push({ ok: false, error: String(err), node: nid, file: f }); }
+      }
+    }
+    addLog(`cluster:sync nodes:${nodes.length} files:${files.length}`);
+    res.json({ results });
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // Export app without listening - let server.js handle listening
 module.exports = app;

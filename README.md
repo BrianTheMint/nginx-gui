@@ -73,3 +73,24 @@ Be careful: enabling a broken config will cause `nginx` to fail on reload — us
 Notes:
 
 - This is an initial scaffold: the frontend is intentionally minimal. We can replace the editor with `Monaco` or `Ace`, add authentication, and add `nginx -t` validation next.
+
+## Cluster management (SSH-based)
+
+You can manage multiple nginx nodes from the GUI (push/pull configs and certificates, validate and reload remotely) using SSH.
+
+Quick steps:
+
+1. The installer generates a management SSH keypair under the app directory at `.ssh/id_manage` and the public key at `.ssh/id_manage.pub`.
+2. Copy the public key to remote nodes' `~/.ssh/authorized_keys` for the user you will use to SSH (e.g., `root`):
+
+```bash
+ssh root@remote 'mkdir -p ~/.ssh && chmod 700 ~/.ssh'
+cat /opt/nginx-gui/.ssh/id_manage.pub | ssh root@remote 'cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys'
+```
+
+3. In the GUI open `/cluster.html`, add nodes (host, port, user), select files, and push/pull configs or upload certificates.
+
+Notes & security:
+
+- Remote commands like moving files to `/etc/nginx` and reloading `nginx` are executed with `sudo` on the remote host; configure the remote SSH user with passwordless `sudo` for those commands or use the `root` user.
+- Treat the management private key with care; it's stored under the app directory and should be protected by OS permissions; consider additional encryption or restricted access on multi-user systems.

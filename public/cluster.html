@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>nginx-gui - Cluster</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="cluster">
+    <h2>🖧 Cluster Management</h2>
+    <section id="key-section">
+      <button id="show-key-btn">🔑 Show Management Public Key</button>
+      <pre id="pub-key" style="white-space:pre-wrap;display:none"></pre>
+    </section>
+
+    <section id="nodes">
+      <h3>Nodes</h3>
+      <ul id="node-list"></ul>
+      <div class="form">
+        <input id="node-name" placeholder="friendly name" />
+        <input id="node-host" placeholder="host or ip" />
+        <input id="node-port" placeholder="port (22)" />
+        <input id="node-user" placeholder="ssh user (root)" />
+        <button id="add-node-btn">➕ Add Node</button>
+      </div>
+    </section>
+
+    <section id="files">
+      <h3>Configs</h3>
+      <select id="file-select"></select>
+      <div>
+        <select id="nodes-select" multiple style="width:100%;height:120px"></select>
+      </div>
+      <button id="push-config-btn">➡️ Push Selected File to Selected Nodes</button>
+      <button id="pull-config-btn">⬅️ Pull Selected File from Selected Node</button>
+    </section>
+
+    <section id="certs">
+      <h3>Upload Certs to Node</h3>
+      <input type="file" id="cert-file" />
+      <input id="cert-target" placeholder="target directory (e.g. /etc/ssl/nginx)" />
+      <button id="upload-cert-btn">📤 Upload Cert to Selected Node</button>
+    </section>
+
+    <div id="cluster-output"></div>
+    <p><a href="/">← Back to configs</a></p>
+  </div>
+  <script src="/cluster.js"></script>
+</body>
+</html>

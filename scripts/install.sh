@@ -35,8 +35,9 @@ parse_args(){
       --user) APP_USER="$2"; shift 2;;
       --port) PORT="$2"; shift 2;;
       --node-version) NODE_VERSION="$2"; shift 2;;
+      --generate-keypair) GENERATE_KEYPAIR=true; shift 1;;
       --non-interactive) NONINTERACTIVE=true; shift 1;;
-      -h|--help) echo "Usage: install.sh [--repo <git url>] [--branch <branch>] [--dir <install dir>] [--user <app user>] [--port <port>]"; exit 0;;
+      -h|--help) echo "Usage: install.sh [--repo <git url>] [--branch <branch>] [--dir <install dir>] [--user <app user>] [--port <port>] [--generate-keypair]"; exit 0;;
       --) shift; break;;
       *) err "Unknown arg: $1"; exit 1;;
     esac
@@ -163,6 +164,19 @@ clone_or_update_repo(){
     else
       git clone --branch "$BRANCH" "$REPO" "$INSTALL_DIR"
     fi
+  fi
+
+  # Optionally generate management SSH keypair for cluster management
+  if [ "${GENERATE_KEYPAIR:-false}" = true ] || [ ! -f "$INSTALL_DIR/.ssh/id_manage" ]; then
+    log "Generating management SSH keypair in $INSTALL_DIR/.ssh/"
+    mkdir -p "$INSTALL_DIR/.ssh"
+    ssh-keygen -t rsa -b 4096 -f "$INSTALL_DIR/.ssh/id_manage" -N "" -C "nginx-gui management key" || true
+    chown -R "$APP_USER":"$APP_USER" "$INSTALL_DIR/.ssh" || true
+    chmod 700 "$INSTALL_DIR/.ssh" || true
+    chmod 600 "$INSTALL_DIR/.ssh/id_manage" || true
+    chmod 644 "$INSTALL_DIR/.ssh/id_manage.pub" || true
+    log "Management public key:
+$(cat "$INSTALL_DIR/.ssh/id_manage.pub")"
   fi
 }
 

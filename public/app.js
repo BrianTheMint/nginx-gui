@@ -175,3 +175,17 @@ downloadBtn.addEventListener('click', () => {
 });
 
 loadFiles();
+
+// If we came from a cluster pull, write pulled file into local configs and open it
+(async function handlePulledFile(){
+  try {
+    const s = localStorage.getItem('pulled_file_content');
+    if (!s) return;
+    const p = JSON.parse(s); // { name, content }
+    localStorage.removeItem('pulled_file_content');
+    await api('/api/files/' + encodeURIComponent(p.name), { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: p.content, target: 'local' }) });
+    await loadFiles();
+    const li = Array.from(document.querySelectorAll('#file-list li')).find(n => n.dataset.name === p.name);
+    if (li) li.click();
+  } catch (e) { console.error('pulled file handling failed', e); }
+})();
