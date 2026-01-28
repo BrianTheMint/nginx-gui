@@ -73,8 +73,29 @@ add_key_to_host(){
   local user="root"
   local port=22
   log "Copying public key to ${user}@${host}:${port}"
-  # Try to append via ssh (safest when we can connect as root already)
-  ssh -o BatchMode=yes -o StrictHostKeyChecking=no -p $port ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$PUBKEY' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" && return 0 || return 1
+  # If host resolves to local machine, append locally (run as root)
+  if ping -c1 -W1 "$host" >/dev/null 2>&1; then
+    LOCAL_IPS=$(hostname -I 2>/dev/null || echo "")
+    for ip in $LOCAL_IPS 127.0.0.1 ::1; do
+      if [ "$host" = "$ip" ] || [ "$host" = "localhost" ] || [ "$host" = "$(hostname)" ]; then
+        log "Detected local host; appending key to /root/.ssh/authorized_keys"
+        mkdir -p /root/.ssh && chmod 700 /root/.ssh
+        printf '%s\n' "$PUBKEY" >> /root/.ssh/authorized_keys
+        chmod 600 /root/.ssh/authorized_keys
+        return 0
+      fi
+    done
+  fi
+
+  # prefer using management key if available
+  SSH_ID="/opt/nginx-gui/.ssh/id_manage"
+  SSH_OPTS="-o StrictHostKeyChecking=no -o BatchMode=yes -p $port"
+  if [ -f "$SSH_ID" ]; then
+    ssh -i "$SSH_ID" $SSH_OPTS ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$PUBKEY' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" && return 0 || return 1
+  fi
+
+  # Fallback: try default ssh (may require existing credentials)
+  ssh $SSH_OPTS ${user}@${host} "mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\n' '$PUBKEY' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" && return 0 || return 1
 }
 
 # register node via API
@@ -89,7 +110,13 @@ register_node(){
 install_app_on_node(){
   local host="$1"
   log "Running installer on $host (this will install Node.js, deps, and the app)"
-  ssh -o StrictHostKeyChecking=no root@${host} "curl -fsSL https://raw.githubusercontent.com/BrianTheMint/nginx-gui/main/scripts/install.sh | bash -s -- --dir /opt/nginx-gui --user nginx-gui --port 3000 --non-interactive --generate-keypair" || err "installer failed on $host"
+  SSH_ID="/opt/nginx-gui/.ssh/id_manage"
+  SSH_OPTS="-o StrictHostKeyChecking=no"
+  if [ -f "$SSH_ID" ]; then
+    ssh -i "$SSH_ID" $SSH_OPTS root@${host} "curl -fsSL https://raw.githubusercontent.com/BrianTheMint/nginx-gui/main/scripts/install.sh | bash -s -- --dir /opt/nginx-gui --user nginx-gui --port 3000 --non-interactive --generate-keypair" || err "installer failed on $host"
+  else
+    ssh $SSH_OPTS root@${host} "curl -fsSL https://raw.githubusercontent.com/BrianTheMint/nginx-gui/main/scripts/install.sh | bash -s -- --dir /opt/nginx-gui --user nginx-gui --port 3000 --non-interactive --generate-keypair" || err "installer failed on $host"
+  fi
 }
 
 # main loop
