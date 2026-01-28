@@ -24,7 +24,36 @@ const certFile = document.getElementById('cert-file');
 const certTarget = document.getElementById('cert-target');
 const output = document.getElementById('cluster-output');
 
-function show(msg) { output.textContent = (output.textContent || '') + '\n' + msg; }
+function show(msg) { 
+  const line = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  output.textContent = (output.textContent || '') + '\n' + line; 
+  output.scrollTop = output.scrollHeight;
+}
+
+function showStatusModal(message, title, type) {
+  let modal = document.getElementById('status-modal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'status-modal';
+    modal.style.cssText = 'position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border:2px solid #333;padding:20px;border-radius:8px;z-index:10000;max-width:600px;max-height:80vh;overflow-y:auto;box-shadow:0 4px 20px rgba(0,0,0,0.3)';
+    document.body.appendChild(modal);
+  }
+  const titleEl = document.createElement('h3');
+  titleEl.textContent = title;
+  titleEl.style.margin = '0 0 12px 0';
+  const msgEl = document.createElement('pre');
+  msgEl.textContent = message;
+  msgEl.style.cssText = 'white-space:pre-wrap;word-wrap:break-word;margin:0 0 12px 0;font-size:12px;background:#f5f5f5;padding:10px;border-radius:4px;max-height:300px;overflow-y:auto';
+  const closeBtn = document.createElement('button');
+  closeBtn.textContent = '✓ Close';
+  closeBtn.style.cssText = 'padding:8px 16px;background:#4CAF50;color:white;border:none;border-radius:4px;cursor:pointer';
+  closeBtn.addEventListener('click', () => modal.style.display = 'none');
+  modal.innerHTML = '';
+  modal.appendChild(titleEl);
+  modal.appendChild(msgEl);
+  modal.appendChild(closeBtn);
+  modal.style.display = 'block';
+}
 
 async function loadKey() {
   try {
@@ -42,13 +71,51 @@ async function loadNodes() {
   nodesSelect.innerHTML = '';
   (res.nodes || []).forEach(n => {
     const li = document.createElement('li');
-    li.textContent = `${n.name} (${n.host})`;
-    const del = document.createElement('button'); del.textContent = '🗑'; del.addEventListener('click', async () => {
+    li.style.marginBottom = '10px';
+    li.innerHTML = `<strong>${n.name}</strong> (${n.host})`;
+    
+    const btnGroup = document.createElement('div');
+    btnGroup.style.marginTop = '6px';
+    
+    const pushBtn = document.createElement('button');
+    pushBtn.textContent = '📤 Push'; pushBtn.style.marginRight = '6px';
+    pushBtn.addEventListener('click', async () => {
+      const file = fileSelect.value;
+      if (!file) return alert('Select a file first');
+      output.textContent = `Pushing ${file} to ${n.name}...`;
+      try {
+        const res = await api('/api/nodes/' + n.id + '/push-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: file }) });
+        show(`✅ Pushed to ${n.name}`);
+      } catch (e) { show(`❌ Push failed on ${n.name}: ${e}`); }
+    });
+    btnGroup.appendChild(pushBtn);
+    
+    const enableBtn = document.createElement('button');
+    enableBtn.textContent = '🔁 Enable+Reload'; enableBtn.style.marginRight = '6px';
+    enableBtn.addEventListener('click', async () => {
+      const file = fileSelect.value;
+      if (!file) return alert('Select a file first');
+      if (!confirm(`Enable and reload ${file} on ${n.name}?`)) return;
+      showStatusModal(`Enabling & reloading ${file}...`, `${n.name}`, null);
+      try {
+        const res = await api('/api/nodes/' + n.id + '/enable-and-reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: file }) });
+        const status = res.ok ? '✅ Success' : '⚠️ Warning';
+        showStatusModal(`${status}\n\nTest output:\n${res.testOut}\n\nReload output:\n${res.reloadOut}`, `${n.name} Result`, 'success');
+        show(`${status}: ${n.name} - ${file}`);
+      } catch (e) { showStatusModal(`❌ Error\n\n${e}`, `${n.name} Failed`, 'error'); show(`❌ Failed: ${n.name} - ${e}`); }
+    });
+    btnGroup.appendChild(enableBtn);
+    
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '🗑'; delBtn.style.color = '#999';
+    delBtn.addEventListener('click', async () => {
       if (!confirm('Delete node ' + n.name + '?')) return;
       await api('/api/nodes/' + n.id, { method: 'DELETE' });
       await loadNodes();
     });
-    li.appendChild(del);
+    btnGroup.appendChild(delBtn);
+    
+    li.appendChild(btnGroup);
     nodeListEl.appendChild(li);
 
     const opt = document.createElement('option'); opt.value = n.id; opt.textContent = `${n.name} (${n.host})`; nodesSelect.appendChild(opt);
@@ -82,19 +149,27 @@ pushConfigBtn.addEventListener('click', async () => {
 });
 
 const enableReloadBtn = document.getElementById('enable-reload-btn');
-enableReloadBtn.addEventListener('click', async () => {
-  const file = fileSelect.value; const nodes = Array.from(nodesSelect.selectedOptions).map(o => o.value);
-  if (!file) return alert('Select a file');
-  if (nodes.length === 0) return alert('Select target nodes (multi-select)');
-  output.textContent = 'Enabling and reloading...';
-  for (const nid of nodes) {
-    try {
-      const res = await api('/api/nodes/' + nid + '/enable-and-reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: file }) });
-      show(JSON.stringify({ node: nid, result: res }));
-    } catch (e) { show(JSON.stringify({ node: nid, error: String(e) })); }
-  }
-  alert('Enable + Reload complete (see results)');
-});
+if (enableReloadBtn) {
+  enableReloadBtn.addEventListener('click', async () => {
+    const file = fileSelect.value; const nodes = Array.from(nodesSelect.selectedOptions).map(o => o.value);
+    if (!file) return alert('Select a file');
+    if (nodes.length === 0) return alert('Select target nodes (multi-select)');
+    if (!confirm(`Enable and reload ${file} on ${nodes.length} node(s)?`)) return;
+    output.textContent = 'Enabling and reloading...';
+    for (const nid of nodes) {
+      try {
+        showStatusModal(`Processing node ${nid}...`, 'In Progress', null);
+        const res = await api('/api/nodes/' + nid + '/enable-and-reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: file }) });
+        const status = res.ok ? '✅ Success' : '⚠️ Warning';
+        showStatusModal(`${status}\n\nTest output:\n${res.testOut}\n\nReload output:\n${res.reloadOut}`, `Node ${nid}`, 'success');
+        show(`${status} - ${nid}`);
+      } catch (e) { 
+        showStatusModal(`❌ Error:\n${e}`, `Node ${nid} Failed`, 'error');
+        show(`❌ Failed - ${nid}: ${e}`); 
+      }
+    }
+  });
+}
 
 pullConfigBtn.addEventListener('click', async () => {
   const file = fileSelect.value; const nodes = Array.from(nodesSelect.selectedOptions).map(o => o.value);
@@ -138,3 +213,4 @@ if (localStorage.getItem('cluster_pulled_file')) {
 }
 
 loadNodes(); loadFiles();
+setInterval(loadNodes, 60000); // refresh nodes every 60s
