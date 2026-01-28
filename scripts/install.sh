@@ -82,7 +82,37 @@ install_node(){
   if [ "$PKG_MGR" = "apt" ]; then
     # NodeSource official installer
     curl -fsSL https://deb.nodesource.com/setup_$NODE_VERSION | bash -
-    apt-get install -y nodejs
+
+    # Try a normal install first
+    if apt-get install -y nodejs; then
+      log "nodejs installed successfully"
+    else
+      err "apt install nodejs failed; attempting to resolve conflicts and retry"
+
+      # Common conflict: older libnode-dev or nodejs-doc packages own header files
+      CONFLICTS="$(dpkg -l | awk '/libnode-dev|nodejs-doc|nodejs-dev/ {print $2}' | tr '\n' ' ')"
+      if [ -n "$CONFLICTS" ]; then
+        log "Removing conflicting packages: $CONFLICTS"
+        apt-get remove --purge -y $CONFLICTS || true
+      fi
+
+      # Try to recover from broken installs
+      log "Running apt-get -f install and dpkg --configure -a"
+      apt-get -f install -y || true
+      dpkg --configure -a || true
+
+      # Retry install; allow dpkg to overwrite if needed as a last resort
+      if apt-get install -y nodejs; then
+        log "nodejs installed successfully on retry"
+      else
+        log "Retry with force-overwrite option"
+        apt-get -o Dpkg::Options::=\"--force-overwrite\" install -y nodejs || {
+          err "Failed to install nodejs even after attempting cleanup. Please inspect apt/dpkg state (dpkg -C; apt-get -f install) or remove conflicting packages manually."
+          exit 1
+        }
+      fi
+    fi
+
   elif [ "$PKG_MGR" = "dnf" ] || [ "$PKG_MGR" = "yum" ]; then
     curl -fsSL https://rpm.nodesource.com/setup_$NODE_VERSION | bash -
     ${PKG_MGR} install -y nodejs
