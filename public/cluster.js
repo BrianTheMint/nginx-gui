@@ -81,6 +81,21 @@ pushConfigBtn.addEventListener('click', async () => {
   alert('Push complete (see results)');
 });
 
+const enableReloadBtn = document.getElementById('enable-reload-btn');
+enableReloadBtn.addEventListener('click', async () => {
+  const file = fileSelect.value; const nodes = Array.from(nodesSelect.selectedOptions).map(o => o.value);
+  if (!file) return alert('Select a file');
+  if (nodes.length === 0) return alert('Select target nodes (multi-select)');
+  output.textContent = 'Enabling and reloading...';
+  for (const nid of nodes) {
+    try {
+      const res = await api('/api/nodes/' + nid + '/enable-and-reload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ filename: file }) });
+      show(JSON.stringify({ node: nid, result: res }));
+    } catch (e) { show(JSON.stringify({ node: nid, error: String(e) })); }
+  }
+  alert('Enable + Reload complete (see results)');
+});
+
 pullConfigBtn.addEventListener('click', async () => {
   const file = fileSelect.value; const nodes = Array.from(nodesSelect.selectedOptions).map(o => o.value);
   if (!file) return alert('Select a file');

@@ -492,6 +492,48 @@ app.post('/api/nodes/:id/push-certs', requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: String(e) }); }
 });
 
+// Enable a config on a node and reload nginx (atomic: symlink -> nginx -t -> reload)
+app.post('/api/nodes/:id/enable-and-reload', requireAuth, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const node = findNode(id);
+    if (!node) return res.status(404).json({ error: 'node not found' });
+    const { filename } = req.body || {};
+    if (!filename) return res.status(400).json({ error: 'filename required' });
+    const base = path.basename(filename);
+    const remoteAvail = `/etc/nginx/sites-available/${base}`;
+    const remoteEnabled = `/etc/nginx/sites-enabled/${base}`;
+
+    // try with ssh2/node-ssh first
+    try {
+      const ssh = await sshConnectToNode(node);
+      const stat = await ssh.execCommand(`test -f ${remoteAvail} && echo EXISTS || echo MISSING`);
+      if ((stat.stdout || '').trim() !== 'EXISTS') { ssh.dispose(); return res.status(404).json({ error: 'remote config not found' }); }
+      await ssh.execCommand(`sudo ln -sf ${remoteAvail} ${remoteEnabled}`);
+      const test = await ssh.execCommand('sudo nginx -t');
+      if (test.code) { ssh.dispose(); return res.status(500).json({ ok: false, testErr: test.stderr || test.stdout }); }
+      const reload = await ssh.execCommand('sudo systemctl reload nginx || sudo nginx -s reload');
+      ssh.dispose();
+      addLog(`enable-and-reload ${node.host} ${base} test:${test.code || 0} reload:${reload.code || 0}`);
+      return res.json({ ok: true, testOut: test.stdout + test.stderr, reloadOut: reload.stdout + reload.stderr });
+    } catch (e) {
+      // fallback to CLI ssh/scp
+      try {
+        const check = await sshExecOnNode(node, `test -f ${remoteAvail} && echo EXISTS || echo MISSING`);
+        if ((check.stdout || '').trim() !== 'EXISTS') return res.status(404).json({ error: 'remote config not found' });
+        await sshExecOnNode(node, `sudo ln -sf ${remoteAvail} ${remoteEnabled}`);
+        const t = await sshExecOnNode(node, 'sudo nginx -t');
+        if ((t.stderr || '').trim()) return res.status(500).json({ ok: false, testErr: t.stderr || t.stdout });
+        const r = await sshExecOnNode(node, 'sudo systemctl reload nginx || sudo nginx -s reload');
+        addLog(`enable-and-reload(fallback) ${node.host} ${base}`);
+        return res.json({ ok: true, testOut: t.stdout + t.stderr, reloadOut: r.stdout + r.stderr });
+      } catch (err) {
+        return res.status(500).json({ error: String(e || err) });
+      }
+    }
+  } catch (e) { res.status(500).json({ error: String(e) }); }
+});
+
 // bulk sync: body { files: [filename...], nodes: [id...], action: 'push' }
 app.post('/api/cluster/sync', requireAuth, async (req, res) => {
   try {
