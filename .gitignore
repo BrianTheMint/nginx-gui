@@ -4,4 +4,10 @@ node_modules/
 out/
 *.log
 .DS_Store
+backup.zip
+backup.tar.gz
+.git/
+.env.local
+dist/
+build/
 

@@ -13,6 +13,30 @@ npm install
 npm run dev    # or `npm start` to run without nodemon
 ```
 
+Automatic install (curl | bash)
+
+You can install and setup the app automatically on a Linux host with a single command (runs the installer in this repo):
+
+```bash
+# Run as root or with sudo
+curl -fsSL https://raw.githubusercontent.com/BrianTheMint/nginx-gui/main/scripts/install.sh | sudo bash -s -- --dir /opt/nginx-gui --user nginx-gui --port 3000
+```
+
+Installer options (defaults shown):
+
+- `--repo <git url>` (default: `https://github.com/BrianTheMint/nginx-gui.git`)
+- `--branch <branch>` (default: `main`)
+- `--dir <install dir>` (default: `/opt/nginx-gui`)
+- `--user <system user>` (default: `nginx-gui`)
+- `--port <port>` (default: `3000`)
+- `--node-version <node setup version>` (default: `20.x`)
+
+Notes:
+
+- The installer will detect your package manager (apt/dnf/yum/apk), install Node.js, `git`, and the GitHub CLI (`gh`) when possible, clone the repo to the target install dir, install npm dependencies, create a systemd service `nginx-gui.service`, enable and start it.
+- If your repo is private, set `GITHUB_TOKEN` in the environment before running the installer so it can clone non-public repositories (the script uses `git -c http.extraheader` to keep the token out of the process list).
+- After installation you may want to run `gh auth login` on the server to configure `gh` for pushing or use `gh auth setup-git` to configure git credential helper.
+
 3. Open http://localhost:3000 in your browser.
 
 Writing to system nginx directory:
